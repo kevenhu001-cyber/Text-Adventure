@@ -114,32 +114,65 @@ jobs:
           echo "版本 $NAME (versionCode=$CODE)"
 
       - name: 还原签名密钥
-        # 缺少密钥就直接失败并给出补救指引。
-        # 绝不在 CI 里临时生成密钥：那样每次构建签名密钥都不同，
+        # Secrets 命名上兼容两种写法：
+        #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD（仓库里已配的）
+        #   KEYSTORE_BASE64 / KEYSTORE_PASSWORD（README 文档里写的）
+        # 两者配任意一组即可。
+        #
+        # KEY_ALIAS 缺省时用 keytool 从 keystore 里读第一个别名；
+        # KEY_PASSWORD 缺省时复用 store 密码（最常见的情况）。
+        # 这样只配两个 Secret 也能直接出包，不必强行凑齐四个。
+        #
+        # 绝不在 CI 里临时生成密钥：每次构建签名密钥都不同的话，
         # Android 不允许用不同密钥覆盖安装，用户的应用会装不上去。
         env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          missing=""
-          [ -z "$KEYSTORE_BASE64" ] && missing="$missing KEYSTORE_BASE64"
-          [ -z "$KEY_ALIAS" ] && missing="$missing KEY_ALIAS"
-          [ -z "$KEYSTORE_PASSWORD" ] && missing="$missing KEYSTORE_PASSWORD"
-          [ -z "$KEY_PASSWORD" ] && missing="$missing KEY_PASSWORD"
-          if [ -n "$missing" ]; then
-            echo "::error::缺少仓库 Secrets：$missing"
+          B64="${ANDROID_KEYSTORE_BASE64:-$KEYSTORE_BASE64}"
+          STORE_PASS="${ANDROID_KEYSTORE_PASSWORD:-$KEYSTORE_PASSWORD}"
+
+          if [ -z "$B64" ] || [ -z "$STORE_PASS" ]; then
+            echo "::error::缺少 keystore 凭据。需要下列任意一组："
+            echo "::error::  ANDROID_KEYSTORE_BASE64 + ANDROID_KEYSTORE_PASSWORD"
+            echo "::error::  或 KEYSTORE_BASE64 + KEYSTORE_PASSWORD"
             echo "::error::请在 Settings → Secrets and variables → Actions 中补齐后重跑。"
-            echo "::error::生成方式见仓库 README 的「发布 Release」一节。"
             exit 1
           fi
-          echo "$KEYSTORE_BASE64" | base64 --decode > release.jks
+
+          echo "$B64" | base64 --decode > release.jks
+          if [ ! -s release.jks ]; then
+            echo "::error::keystore 解码失败，请检查 Base64 内容是否完整"
+            exit 1
+          fi
+
+          ALIAS="${KEY_ALIAS:-}"
+          if [ -z "$ALIAS" ]; then
+            # 从 keystore 中读出第一个别名
+            ALIAS=$(keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>/dev/null \
+                    | grep -oE 'Alias name: .*' | head -1 | sed 's/^Alias name: //' || true)
+          fi
+          if [ -z "$ALIAS" ]; then
+            echo "::error::无法确定 keystore 别名。请手动添加 Secret: KEY_ALIAS"
+            keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>&1 | head -20 || true
+            exit 1
+          fi
+
+          # key 密码默认与 store 密码一致
+          KEY_PASS="${KEY_PASSWORD:-$STORE_PASS}"
+
           # 用 printf 而非 heredoc：YAML run 块里的缩进会让 <<EOF 终止符无法匹配
           printf 'storeFile=release.jks\nkeyAlias=%s\nstorePassword=%s\nkeyPassword=%s\n' \
-            "$KEY_ALIAS" "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" > key.properties
-          echo "签名密钥已还原"
+            "$ALIAS" "$STORE_PASS" "$KEY_PASS" > key.properties
+
+          echo "别名: $ALIAS"
+          [ -n "$KEY_PASSWORD" ] && echo "key 密码: 已单独提供" || echo "key 密码: 复用 store 密码"
+          echo "签名密钥已就绪"
 
       - name: 单元测试
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_tests == 'true' || github.event_name == 'push' }}
