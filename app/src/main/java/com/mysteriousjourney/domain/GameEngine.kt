@@ -203,6 +203,17 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
     }
 
     /**
+     * Map 版本的同类限制（NPC 关系用）。
+     */
+    private fun <K, V> Map<K, V>.renderPromptList(limit: Int, transform: (K, V) -> String): String {
+        if (isEmpty()) return "无"
+        val all = entries.toList()
+        val shown = if (all.size <= limit) all else all.takeLast(limit)
+        val body = shown.joinToString("、") { (k, v) -> transform(k, v) }
+        return if (shown.size < all.size) "$body（另有 ${all.size - shown.size} 项未列出）" else body
+    }
+
+    /**
      * 构建聊天历史
      * 将GameState中的聊天历史转换为API所需的Message格式
      */

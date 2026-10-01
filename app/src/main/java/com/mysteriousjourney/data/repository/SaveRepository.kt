@@ -177,7 +177,9 @@ class SaveRepository(
     private fun stateFile(id: Long) = File(saveDir, "$id$STATE_SUFFIX")
 
     private fun metaFiles(): List<File> =
-        saveDir.listFiles { f -> f.isFile && f.name.endsWith(META_SUFFIX) }.orEmpty()
+        // listFiles 返回的是平台类型 Array<File>!，直接 orEmpty() 会因重载歧义被推断成 List，
+        // 这里显式 toList() 再兜底，避免编译期类型不匹配。
+        saveDir.listFiles { f -> f.isFile && f.name.endsWith(META_SUFFIX) }?.toList() ?: emptyList()
 
     private fun writeMeta(entry: SaveSlotEntry) {
         metaFile(entry.id).writeText(gson.toJson(entry), Charsets.UTF_8)
