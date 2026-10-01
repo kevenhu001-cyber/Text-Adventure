@@ -133,7 +133,11 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # 注意：这里刻意不加 -e。
+          # 别名探测依赖"grep 匹配不到时返回 1"作为分支信号，
+          # 若开启 set -e，管道非零退出会让脚本在无声中断里直接死掉，
+          # 日志一个字都不打，排查成本极高。改用显式的错误判断。
           B64="${ANDROID_KEYSTORE_BASE64:-$KEYSTORE_BASE64}"
           STORE_PASS="${ANDROID_KEYSTORE_PASSWORD:-$KEYSTORE_PASSWORD}"
 
@@ -141,22 +145,26 @@ jobs:
             echo "::error::缺少 keystore 凭据。需要下列任意一组："
             echo "::error::  ANDROID_KEYSTORE_BASE64 + ANDROID_KEYSTORE_PASSWORD"
             echo "::error::  或 KEYSTORE_BASE64 + KEYSTORE_PASSWORD"
-            echo "::error::请在 Settings → Secrets and variables → Actions 中补齐后重跑。"
             exit 1
           fi
+          echo "凭据已读取：base64 长度 ${#B64}，密码长度 ${#STORE_PASS}"
 
-          echo "$B64" | base64 --decode > release.jks
-          if [ ! -s release.jks ]; then
-            echo "::error::keystore 解码失败，请检查 Base64 内容是否完整"
+          # 去掉可能混入的换行与空白后再解码
+          printf '%s' "$B64" | tr -d '[:space:]' | base64 --decode > release.jks
+          DECODE_RC=$?
+          if [ $DECODE_RC -ne 0 ] || [ ! -s release.jks ]; then
+            echo "::error::keystore 解码失败（base64 返回码 $DECODE_RC，解码后大小 $(stat -c%s release.jks 2>/dev/null || echo 0) 字节）"
+            echo "::error::请确认 ANDROID_KEYSTORE_BASE64 是 .jks 文件的 base64 内容，且未混入多余字符。"
             exit 1
           fi
+          echo "keystore 已解码：$(stat -c%s release.jks) 字节"
 
           ALIAS="${KEY_ALIAS:-}"
           if [ -z "$ALIAS" ]; then
             # keytool 在 JDK 17 改过 -list 的输出格式，两种都要兼容：
             #   旧: "Alias name: my-key-alias"
             #   新: "my-key-alias, Oct 1, 2026, PrivateKeyEntry,"
-            LISTING=$(keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>/dev/null || true)
+            LISTING=$(keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>/dev/null)
             ALIAS=$(echo "$LISTING" | grep -oE 'Alias name: .+' | head -1 | sed 's/^Alias name: //' | tr -d '[:space:]')
             if [ -z "$ALIAS" ]; then
               # 新格式：取 "Your keystore contains ..." 之后的第一行，逗号前的部分
@@ -166,7 +174,7 @@ jobs:
           if [ -z "$ALIAS" ]; then
             echo "::error::无法确定 keystore 别名。请手动添加 Secret: KEY_ALIAS"
             echo "::error::keytool 实际输出如下："
-            keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>&1 | head -20 || true
+            echo "$LISTING"
             exit 1
           fi
 
