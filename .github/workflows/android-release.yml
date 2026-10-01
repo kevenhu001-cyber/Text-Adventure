@@ -133,11 +133,13 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          # 关键：GitHub Actions 的 run 块固定以 `bash -e {0}` 执行，
+          # 也就是无论脚本里怎么写，errexit 都是开着的，脚本内无法通过去掉 -e 来关闭。
+          # 而别名探测恰恰依赖"grep 匹配不到时返回 1"作为分支信号，
+          # 在 -e 下会让脚本无输出地直接死掉，CI 日志里看不到任何线索。
+          # 因此这里显式 set +e 关掉 errexit，所有真实错误改由下面的显式 exit 1 把关。
+          set +e
           set -uo pipefail
-          # 注意：这里刻意不加 -e。
-          # 别名探测依赖"grep 匹配不到时返回 1"作为分支信号，
-          # 若开启 set -e，管道非零退出会让脚本在无声中断里直接死掉，
-          # 日志一个字都不打，排查成本极高。改用显式的错误判断。
           B64="${ANDROID_KEYSTORE_BASE64:-$KEYSTORE_BASE64}"
           STORE_PASS="${ANDROID_KEYSTORE_PASSWORD:-$KEYSTORE_PASSWORD}"
 
