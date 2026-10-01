@@ -1,0 +1,31 @@
+# Android / Gradle
+*.iml
+.gradle/
+build/
+app/build/
+local.properties
+.cxx/
+.externalNativeBuild/
+/captures
+
+# Keystore / signing
+*.keystore
+*.jks
+key.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / AI tool configs
+.idea/
+.vscode/
+.codebuddy/
+.qoder/
+.trae/
+codebuddy/
+graphify-out/
+
+# Misc
+*.bak
+backup_icons/

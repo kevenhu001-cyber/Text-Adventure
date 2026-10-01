@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">诡秘之旅</string>
+    <string name="hello_world">Hello World!</string>
+    <string name="send">发送</string>
+    <string name="save_game">保存游戏</string>
+    <string name="load_game">加载游戏</string>
+    <string name="settings">设置</string>
+    <string name="status_spirituality">灵性</string>
+    <string name="status_madness">疯狂</string>
+    <string name="status_money">金钱</string>
+    <string name="status_time">时间</string>
+</resources>

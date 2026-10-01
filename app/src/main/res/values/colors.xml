@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 黑色主题颜色 -->
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    
+    <!-- 金色强调色 -->
+    <color name="gold_primary">#B8860B</color>
+    <color name="gold_primary_variant">#D4AF37</color>
+    <color name="gold_secondary">#CD7F32</color>
+    <color name="gold_secondary_variant">#E6BE8A</color>
+    
+    <!-- 状态颜色 -->
+    <color name="red_error">#FF5252</color>
+    <color name="green_success">#4CAF50</color>
+    <color name="blue_info">#2196F3</color>
+    <color name="orange_warning">#FF9800</color>
+    
+    <!-- 灵性和疯狂值颜色 -->
+    <color name="spirituality_blue">#2196F3</color>
+    <color name="madness_red">#FF5252</color>
+    <color name="money_green">#4CAF50</color>
+    <color name="time_yellow">#FFEB3B</color>
+</resources>
