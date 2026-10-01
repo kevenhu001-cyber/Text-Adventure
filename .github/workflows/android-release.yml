@@ -153,12 +153,19 @@ jobs:
 
           ALIAS="${KEY_ALIAS:-}"
           if [ -z "$ALIAS" ]; then
-            # 从 keystore 中读出第一个别名
-            ALIAS=$(keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>/dev/null \
-                    | grep -oE 'Alias name: .*' | head -1 | sed 's/^Alias name: //' || true)
+            # keytool 在 JDK 17 改过 -list 的输出格式，两种都要兼容：
+            #   旧: "Alias name: my-key-alias"
+            #   新: "my-key-alias, Oct 1, 2026, PrivateKeyEntry,"
+            LISTING=$(keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>/dev/null || true)
+            ALIAS=$(echo "$LISTING" | grep -oE 'Alias name: .+' | head -1 | sed 's/^Alias name: //' | tr -d '[:space:]')
+            if [ -z "$ALIAS" ]; then
+              # 新格式：取 "Your keystore contains ..." 之后的第一行，逗号前的部分
+              ALIAS=$(echo "$LISTING" | grep -A1 -E '^Your keystore contains' | tail -1 | cut -d',' -f1 | tr -d '[:space:]')
+            fi
           fi
           if [ -z "$ALIAS" ]; then
             echo "::error::无法确定 keystore 别名。请手动添加 Secret: KEY_ALIAS"
+            echo "::error::keytool 实际输出如下："
             keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>&1 | head -20 || true
             exit 1
           fi
