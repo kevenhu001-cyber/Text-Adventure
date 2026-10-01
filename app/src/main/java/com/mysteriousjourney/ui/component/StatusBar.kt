@@ -27,6 +27,10 @@ import com.mysteriousjourney.ui.theme.MadnessRed
 import com.mysteriousjourney.ui.theme.SpiritBlue
 import com.mysteriousjourney.ui.theme.White
 
+/** 计算进度比例，分母非正时返回 0，避免 Infinity/NaN 进入进度条 */
+private fun safeRatio(value: Int, max: Int): Float =
+    if (max <= 0) 0f else (value.toFloat() / max.toFloat()).coerceIn(0f, 1f)
+
 @Composable
 fun StatusBar(
     spirit: Int,
@@ -90,7 +94,9 @@ fun StatusBar(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 LinearProgressIndicator(
-                    progress = spirit.toFloat() / maxSpirit.toFloat(),
+                    // 防御 maxSpirit=0：损坏或旧版存档可能反序列化出 0 上限，
+                    // 直接相除会得到 Infinity/NaN 把进度条画坏
+                    progress = safeRatio(spirit, maxSpirit),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp),
@@ -107,7 +113,7 @@ fun StatusBar(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 LinearProgressIndicator(
-                    progress = madness.toFloat() / maxMadness.toFloat(),
+                    progress = safeRatio(madness, maxMadness),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp),

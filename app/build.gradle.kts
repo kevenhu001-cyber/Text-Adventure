@@ -20,8 +20,10 @@ android {
         applicationId = "com.mysteriousjourney"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // CI 通过 -PversionName / -PversionCode 注入发版版本号；
+        // 本地构建不带这两个属性时回落到下面的默认值。
+        versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

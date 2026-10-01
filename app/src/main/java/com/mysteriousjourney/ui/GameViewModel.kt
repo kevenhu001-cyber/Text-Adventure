@@ -3,6 +3,7 @@ package com.mysteriousjourney.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.mysteriousjourney.data.api.AiApiService
+import com.mysteriousjourney.data.model.Message
 import com.mysteriousjourney.data.repository.SaveRepository
 import com.mysteriousjourney.data.settings.CustomModelConfig
 import com.mysteriousjourney.data.settings.SettingsRepository
@@ -12,14 +13,13 @@ import com.mysteriousjourney.domain.model.OpeningScenario
 import com.mysteriousjourney.domain.model.OpeningScenarios
 import com.mysteriousjourney.ui.component.NarrativeMessage
 import com.mysteriousjourney.util.ChoiceParser
-import com.mysteriousjourney.util.StateParser
 import com.mysteriousjourney.util.TextFormatter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 
 data class GameViewModelState(
     val isGameInitialized: Boolean = false,
@@ -50,10 +50,26 @@ data class GameViewModelState(
 
 class GameViewModel : ViewModel() {
 
+    private companion object {
+        /** 主动推进剧情时发给 AI 的指令 */
+        const val ADVANCE_PROMPT = "请继续推进剧情，描述当前环境并给出下一步选择"
+
+        /** 流式中间帧的最小渲染间隔（毫秒），限制主线程全量重解析的频率 */
+        const val RENDER_INTERVAL_MS = 50L
+    }
+
     private val aiApiService = AiApiService()
     private val gameEngine = GameEngine(aiApiService)
     private val saveRepository = SaveRepository()
     private val settingsRepository = SettingsRepository()
+
+    /**
+     * 消息 id 自增计数器。
+     *
+     * 读档恢复的历史消息用负数 id，与这里生成的正数 id 天然不重叠，
+     * 保证 LazyColumn 的 key 全局唯一。
+     */
+    private var messageSeq = 0L
 
     private val _uiState = MutableStateFlow(GameViewModelState())
     val uiState: StateFlow<GameViewModelState> = _uiState.asStateFlow()
@@ -129,7 +145,7 @@ class GameViewModel : ViewModel() {
             val parseResult = ChoiceParser.parseResponse(openingNarrative)
 
             val welcomeMessage = NarrativeMessage(
-                id = System.currentTimeMillis(),
+                id = ++messageSeq,
                 content = parseResult.narrative,
                 isSystem = true
             )
@@ -184,367 +200,134 @@ class GameViewModel : ViewModel() {
         }
     }
 
+    /**
+     * 处理玩家自由输入
+     */
     fun processPlayerInput(input: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null, choices = emptyList(), pendingChoices = emptyList(), showChoices = false) }
-            println("开始处理玩家输入: $input")
-
-            val playerMessage = NarrativeMessage(
-                id = System.currentTimeMillis(),
-                content = input,
-                isPlayer = true
-            )
-
-            val tempAiMessage = NarrativeMessage(
-                id = System.currentTimeMillis() + 1,
-                content = "",
-                isSystem = false,
-                isStreaming = true
-            )
-
-            _uiState.update { it.copy(messages = it.messages + playerMessage + tempAiMessage) }
-
-            try {
-                var accumulatedContent = ""
-                val streamDelayMs = 50L
-
-                val result = aiApiService.sendGameMessageStream(
-                    systemPrompt = gameEngine.buildSystemPrompt(),
-                    chatHistory = gameEngine.buildChatHistory(),
-                    userInput = input
-                ) { chunk ->
-                    if (chunk.isNotEmpty()) {
-                        viewModelScope.launch {
-                            delay(streamDelayMs)
-                            accumulatedContent += chunk
-                            val parseResult = ChoiceParser.parseResponse(accumulatedContent)
-
-                            _uiState.update { currentState ->
-                                val updatedMessages = currentState.messages.toMutableList()
-                                if (updatedMessages.isNotEmpty()) {
-                                    val lastIndex = updatedMessages.lastIndex
-                                    updatedMessages[lastIndex] = updatedMessages[lastIndex].copy(
-                                        content = parseResult.narrative,
-                                        isStreaming = true,
-                                        isTypewriterComplete = false
-                                    )
-                                }
-                                currentState.copy(
-                                    messages = updatedMessages,
-                                    pendingChoices = parseResult.choices,
-                                    choices = emptyList(),
-                                    showChoices = false,
-                                    isTypewriterRunning = true,
-                                    isLoading = false
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (result.isSuccess) {
-                    val fullContent = result.getOrNull() ?: ""
-                    println("AI处理结果 - 成功, 内容长度: ${fullContent.length}")
-
-                    val parseResult = ChoiceParser.parseResponse(fullContent)
-                    val stateParseResult = StateParser.parseResponse(fullContent)
-
-                    if (stateParseResult.stateUpdate != null) {
-                        gameEngine.applyStateUpdate(stateParseResult.stateUpdate)
-                    }
-
-                    gameEngine.addToChatHistory(input, fullContent)
-
-                    val formattedNarrative = TextFormatter.formatText(parseResult.narrative)
-
-                    val finalAiMessage = NarrativeMessage(
-                        id = System.currentTimeMillis() + 1,
-                        content = formattedNarrative,
-                        isSystem = false,
-                        isStreaming = false
-                    )
-
-                    val currentState = gameEngine.getGameState()
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            messages = it.messages.dropLast(1) + finalAiMessage,
-                            choices = emptyList(),
-                            pendingChoices = ensureChoices(parseResult.choices),
-                            showChoices = false,
-                            isTypewriterRunning = true,
-                            spirit = currentState.player.spirituality.current,
-                            maxSpirit = currentState.player.spirituality.max,
-                            madness = currentState.player.sanity.madnessValue,
-                            goldPounds = currentState.player.money.goldPounds,
-                            soles = currentState.player.money.soles,
-                            pence = currentState.player.money.pence,
-                            currentTime = currentState.world.currentTime,
-                            location = currentState.world.currentLocation
-                        )
-                    }
-                    println("成功解析出${parseResult.choices.size}个选择选项")
-                } else {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            messages = it.messages.dropLast(1),
-                            error = result.exceptionOrNull()?.message ?: "处理输入时发生错误"
-                        )
-                    }
-                    println("处理失败，错误信息: ${result.exceptionOrNull()?.message}")
-                }
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        messages = it.messages.dropLast(1),
-                        error = e.message ?: "处理输入时发生错误"
-                    )
-                }
-                println("处理异常: ${e.message}")
-            }
-        }
+        sendMessage(userInput = input, echoPlayerMessage = true)
     }
 
+    /**
+     * 推进剧情（AI 主动续写）
+     */
     fun advancePlot() {
+        sendMessage(userInput = ADVANCE_PROMPT, echoPlayerMessage = false)
+    }
+
+    /**
+     * 玩家点击了某个分支选项
+     */
+    fun selectChoice(choice: ChoiceParser.Choice) {
+        sendMessage(userInput = "用户选择了: ${choice.text}", echoPlayerMessage = true)
+    }
+
+    /**
+     * 发送一轮对话的单一入口。
+     *
+     * 三个对外方法（自由输入 / 推进剧情 / 选择分支）只差一个入参和是否回显玩家气泡，
+     * 共用这条路径。流式内容按固定节奏刷新，collect 正常结束后才提交最终 UI 状态——
+     * 中间帧不可能再覆盖结果，因为根本不存在"迟到的帧"：所有 UI 写入都发生在这一个协程里。
+     */
+    private fun sendMessage(userInput: String, echoPlayerMessage: Boolean) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null, choices = emptyList(), pendingChoices = emptyList(), showChoices = false) }
-            println("开始推进剧情")
+            // 上一轮还在流式或打字机阶段时忽略重复触发
+            if (_uiState.value.isLoading || _uiState.value.isTypewriterRunning) return@launch
 
-            val tempAiMessage = NarrativeMessage(
-                id = System.currentTimeMillis(),
-                content = "",
-                isSystem = false,
-                isStreaming = true
-            )
+            _uiState.update {
+                it.copy(isLoading = true, error = null, choices = emptyList(), pendingChoices = emptyList(), showChoices = false)
+            }
 
-            _uiState.update { it.copy(messages = it.messages + tempAiMessage) }
+            // 玩家气泡（若需要）与占位气泡成对分配 id
+            val playerMessageId = if (echoPlayerMessage) ++messageSeq else 0L
+            val messageId = ++messageSeq
+            val placeholder = NarrativeMessage(id = messageId, content = "", isStreaming = true)
+            val newMessages = buildList {
+                if (echoPlayerMessage) {
+                    add(NarrativeMessage(id = playerMessageId, content = userInput, isPlayer = true))
+                }
+                add(placeholder)
+            }
+            _uiState.update { it.copy(messages = it.messages + newMessages) }
+
+            val buffer = StringBuilder()
+            var lastRenderAt = 0L
 
             try {
-                var accumulatedContent = ""
-                val streamDelayMs = 50L
-
-                val result = aiApiService.sendGameMessageStream(
-                    systemPrompt = gameEngine.buildSystemPrompt(),
-                    chatHistory = gameEngine.buildChatHistory(),
-                    userInput = "请继续推进剧情，描述当前环境并给出下一步选择"
-                ) { chunk ->
-                    if (chunk.isNotEmpty()) {
-                        viewModelScope.launch {
-                            delay(streamDelayMs)
-                            accumulatedContent += chunk
-                            val parseResult = ChoiceParser.parseResponse(accumulatedContent)
-
-                            _uiState.update { currentState ->
-                                val updatedMessages = currentState.messages.toMutableList()
-                                if (updatedMessages.isNotEmpty()) {
-                                    val lastIndex = updatedMessages.lastIndex
-                                    updatedMessages[lastIndex] = updatedMessages[lastIndex].copy(
-                                        content = parseResult.narrative,
-                                        isStreaming = true,
-                                        isTypewriterComplete = false
-                                    )
-                                }
-                                currentState.copy(
-                                    messages = updatedMessages,
-                                    pendingChoices = parseResult.choices,
-                                    choices = emptyList(),
-                                    showChoices = false,
-                                    isTypewriterRunning = true,
-                                    isLoading = false
-                                )
+                gameEngine.streamTurn(userInput).collect { event ->
+                    when (event) {
+                        is GameEngine.TurnEvent.Chunk -> {
+                            buffer.append(event.text)
+                            // 节流渲染：上游吐得多快，主线程最多 20 次/秒全量重解析
+                            val now = System.nanoTime() / 1_000_000
+                            if (now - lastRenderAt >= RENDER_INTERVAL_MS) {
+                                lastRenderAt = now
+                                renderStreaming(messageId, buffer.toString())
                             }
                         }
+                        // 最终态在 collect 结束后统一提交，这里不做任何写入
+                        is GameEngine.TurnEvent.Completed -> Unit
                     }
                 }
 
-                if (result.isSuccess) {
-                    val fullContent = result.getOrNull() ?: ""
-                    println("推进剧情成功 - 内容长度: ${fullContent.length}")
-
-                    val parseResult = ChoiceParser.parseResponse(fullContent)
-                    val stateParseResult = StateParser.parseResponse(fullContent)
-
-                    if (stateParseResult.stateUpdate != null) {
-                        gameEngine.applyStateUpdate(stateParseResult.stateUpdate)
-                    }
-
-                    gameEngine.addToChatHistory("继续剧情", fullContent)
-
-                    val formattedNarrative = TextFormatter.formatText(parseResult.narrative)
-                    val currentState = gameEngine.getGameState()
-
-                    _uiState.update {
-                        val updatedMessages = it.messages.toMutableList()
-                        if (updatedMessages.isNotEmpty()) {
-                            val lastIndex = updatedMessages.lastIndex
-                            updatedMessages[lastIndex] = updatedMessages[lastIndex].copy(
-                                content = formattedNarrative,
-                                isStreaming = false
-                            )
-                        }
-                        it.copy(
-                            isLoading = false,
-                            messages = updatedMessages,
-                            choices = emptyList(),
-                            pendingChoices = ensureChoices(parseResult.choices),
-                            showChoices = false,
-                            isTypewriterRunning = true,
-                            spirit = currentState.player.spirituality.current,
-                            maxSpirit = currentState.player.spirituality.max,
-                            madness = currentState.player.sanity.madnessValue,
-                            goldPounds = currentState.player.money.goldPounds,
-                            soles = currentState.player.money.soles,
-                            pence = currentState.player.money.pence,
-                            currentTime = currentState.world.currentTime,
-                            location = currentState.world.currentLocation
-                        )
-                    }
-                    println("推进剧情成功，解析出${parseResult.choices.size}个选择选项")
-                } else {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            messages = it.messages.dropLast(1),
-                            error = result.exceptionOrNull()?.message ?: "推进剧情时发生错误"
-                        )
-                    }
-                    println("推进剧情失败: ${result.exceptionOrNull()?.message}")
-                }
+                finalizeTurn(messageId, buffer.toString())
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        messages = it.messages.dropLast(1),
-                        error = e.message ?: "推进剧情时发生错误"
+                        messages = it.messages.filterNot { m -> m.id == messageId },
+                        error = e.message ?: "处理消息时发生错误"
                     )
                 }
-                println("推进剧情异常: ${e.message}")
             }
         }
     }
 
-    fun selectChoice(choice: ChoiceParser.Choice) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null, choices = emptyList(), pendingChoices = emptyList(), showChoices = false) }
-            println("用户选择: ${choice.text}")
-
-            val tempAiMessage = NarrativeMessage(
-                id = System.currentTimeMillis(),
-                content = "",
-                isSystem = false,
-                isStreaming = true
+    /** 流式过程中的中间刷新：保持 isStreaming，交由 UI 直接显示，不触发打字机 */
+    private fun renderStreaming(messageId: Long, content: String) {
+        _uiState.update { state ->
+            state.copy(
+                messages = state.messages.map { m ->
+                    if (m.id == messageId) m.copy(content = content, isStreaming = true) else m
+                }
             )
+        }
+    }
 
-            _uiState.update { it.copy(messages = it.messages + tempAiMessage) }
+    /**
+     * 提交本轮最终状态。
+     *
+     * 这里把 isStreaming 置为 false，由 NarrativeText 组件自己跑最后一段打字机，
+     * 完成后回调 [onTypewriterComplete] 再揭示选项——状态栏的交互锁在这个过程中保持生效。
+     */
+    private fun finalizeTurn(messageId: Long, fullText: String) {
+        val parseResult = ChoiceParser.parseResponse(fullText)
+        val currentState = gameEngine.getGameState()
 
-            try {
-                var accumulatedContent = ""
-                var hasReceivedFirstChunk = false
+        val finalMessage = NarrativeMessage(
+            id = messageId,
+            content = TextFormatter.formatText(parseResult.narrative),
+            isStreaming = false
+        )
 
-                val result = aiApiService.sendGameMessageStream(
-                    systemPrompt = gameEngine.buildSystemPrompt(),
-                    chatHistory = gameEngine.buildChatHistory(),
-                    userInput = "用户选择了: ${choice.text}"
-                ) { chunk ->
-                    if (chunk.isNotEmpty()) {
-                        if (!hasReceivedFirstChunk) {
-                            hasReceivedFirstChunk = true
-                            viewModelScope.launch {
-                                _uiState.update { it.copy(isLoading = false) }
-                            }
-                        }
-
-                        accumulatedContent += chunk
-                        viewModelScope.launch {
-                            val parseResult = ChoiceParser.parseResponse(accumulatedContent)
-
-                            _uiState.update { currentState ->
-                                val updatedMessages = currentState.messages.toMutableList()
-                                if (updatedMessages.isNotEmpty()) {
-                                    val lastIndex = updatedMessages.lastIndex
-                                    updatedMessages[lastIndex] = updatedMessages[lastIndex].copy(
-                                        content = parseResult.narrative,
-                                        isStreaming = true,
-                                        isTypewriterComplete = false
-                                    )
-                                }
-                                currentState.copy(
-                                    messages = updatedMessages,
-                                    pendingChoices = parseResult.choices,
-                                    choices = emptyList(),
-                                    showChoices = false,
-                                    isTypewriterRunning = true
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (result.isSuccess) {
-                    val fullContent = result.getOrNull() ?: ""
-                    println("选择处理成功 - 内容长度: ${fullContent.length}")
-
-                    val parseResult = ChoiceParser.parseResponse(fullContent)
-                    val stateParseResult = StateParser.parseResponse(fullContent)
-
-                    if (stateParseResult.stateUpdate != null) {
-                        gameEngine.applyStateUpdate(stateParseResult.stateUpdate)
-                    }
-
-                    gameEngine.addToChatHistory("选择: ${choice.text}", fullContent)
-
-                    val formattedNarrative = TextFormatter.formatText(parseResult.narrative)
-                    val currentState = gameEngine.getGameState()
-
-                    _uiState.update {
-                        val updatedMessages = it.messages.toMutableList()
-                        if (updatedMessages.isNotEmpty()) {
-                            val lastIndex = updatedMessages.lastIndex
-                            updatedMessages[lastIndex] = updatedMessages[lastIndex].copy(
-                                content = formattedNarrative,
-                                isStreaming = false
-                            )
-                        }
-                        it.copy(
-                            isLoading = false,
-                            messages = updatedMessages,
-                            choices = emptyList(),
-                            pendingChoices = ensureChoices(parseResult.choices),
-                            showChoices = false,
-                            isTypewriterRunning = true,
-                            spirit = currentState.player.spirituality.current,
-                            maxSpirit = currentState.player.spirituality.max,
-                            madness = currentState.player.sanity.madnessValue,
-                            goldPounds = currentState.player.money.goldPounds,
-                            soles = currentState.player.money.soles,
-                            pence = currentState.player.money.pence,
-                            currentTime = currentState.world.currentTime,
-                            location = currentState.world.currentLocation
-                        )
-                    }
-                    println("选择处理成功，解析出${parseResult.choices.size}个选择选项")
-                } else {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            messages = it.messages.dropLast(1),
-                            error = result.exceptionOrNull()?.message ?: "处理选择时发生错误"
-                        )
-                    }
-                    println("选择处理失败: ${result.exceptionOrNull()?.message}")
-                }
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        messages = it.messages.dropLast(1),
-                        error = e.message ?: "处理选择时发生错误"
-                    )
-                }
-                println("选择处理异常: ${e.message}")
-            }
+        _uiState.update { state ->
+            state.copy(
+                isLoading = false,
+                messages = state.messages.map { m -> if (m.id == messageId) finalMessage else m },
+                choices = emptyList(),
+                pendingChoices = ensureChoices(parseResult.choices),
+                showChoices = false,
+                isTypewriterRunning = true,
+                spirit = currentState.player.spirituality.current,
+                maxSpirit = currentState.player.spirituality.max,
+                madness = currentState.player.sanity.madnessValue,
+                goldPounds = currentState.player.money.goldPounds,
+                soles = currentState.player.money.soles,
+                pence = currentState.player.money.pence,
+                currentTime = currentState.world.currentTime,
+                location = currentState.world.currentLocation
+            )
         }
     }
 
@@ -605,45 +388,77 @@ class GameViewModel : ViewModel() {
     fun loadGame(saveId: Long, onComplete: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             val loadedState = saveRepository.loadGame(saveId, GameState::class.java)
-            if (loadedState != null) {
-                gameEngine.loadGameState(loadedState)
-                // 恢复 UI 状态
-                val player = loadedState.player
-                val world = loadedState.world
-                _uiState.update {
-                    it.copy(
-                        isGameInitialized = true,
-                        spirit = player.spirituality.current,
-                        maxSpirit = player.spirituality.max,
-                        madness = player.sanity.madnessValue,
-                        goldPounds = player.money.goldPounds,
-                        soles = player.money.soles,
-                        pence = player.money.pence,
-                        currentTime = world.currentTime,
-                        playerName = player.name,
-                        location = world.currentLocation,
-                        sequenceName = player.currentSequence.name,
-                        sequenceNumber = player.currentSequence.number,
-                        digestionProgress = player.currentSequence.digestionProgress,
-                        messages = emptyList(),
-                        choices = emptyList(),
-                        showChoices = false,
-                        error = null
-                    )
-                }
-                // 加载后生成一条提示消息
-                val loadMessage = NarrativeMessage(
-                    id = System.currentTimeMillis(),
-                    content = "**存档已加载**\n\n你回到了${world.currentLocation}，时间是${world.currentTime}。\n\n命运之轮继续转动...",
-                    isSystem = true
-                )
-                _uiState.update { it.copy(messages = listOf(loadMessage)) }
-                onComplete(true)
-            } else {
+            if (loadedState == null) {
                 _uiState.update { it.copy(error = "加载存档失败：找不到存档数据") }
                 onComplete(false)
+                return@launch
             }
+
+            gameEngine.loadGameState(loadedState)
+
+            val player = loadedState.player
+            val world = loadedState.world
+            val restored = restoreMessages(loadedState)
+
+            _uiState.update {
+                it.copy(
+                    isGameInitialized = true,
+                    spirit = player.spirituality.current,
+                    maxSpirit = player.spirituality.max,
+                    madness = player.sanity.madnessValue,
+                    goldPounds = player.money.goldPounds,
+                    soles = player.money.soles,
+                    pence = player.money.pence,
+                    currentTime = world.currentTime,
+                    playerName = player.name,
+                    location = world.currentLocation,
+                    sequenceName = player.currentSequence.name,
+                    sequenceNumber = player.currentSequence.number,
+                    digestionProgress = player.currentSequence.digestionProgress,
+                    // 恢复历史叙事，末条提示打字机完成后揭示默认选项
+                    messages = restored,
+                    choices = emptyList(),
+                    pendingChoices = ensureChoices(emptyList()),
+                    showChoices = false,
+                    isTypewriterRunning = true,
+                    isLoading = false,
+                    error = null
+                )
+            }
+            onComplete(true)
         }
+    }
+
+    /**
+     * 从存档的 chatHistory 重建界面上的对话记录。
+     *
+     * 存档里保存的是 AI 的**原始**响应（含 `{状态标记}` 与 `【选择】` 块），
+     * 直接展示会露出协议噪声，所以这里按与实时渲染相同的规则过一遍 ChoiceParser。
+     * 消息 id 用负数，与时间戳生成的 id 天然不冲突。
+     */
+    private fun restoreMessages(state: GameState): List<NarrativeMessage> {
+        val history = state.chatHistory.mapIndexed { index, chatMessage ->
+            val isPlayer = chatMessage.role == Message.ROLE_USER
+            NarrativeMessage(
+                id = -(index + 1L),
+                content = if (isPlayer) {
+                    chatMessage.content
+                } else {
+                    TextFormatter.formatText(ChoiceParser.parseResponse(chatMessage.content).narrative)
+                },
+                isPlayer = isPlayer,
+                isTypewriterComplete = true
+            )
+        }
+
+        // 末条系统提示负责告知玩家"读档回到了哪里"，放在最后保证一进屏就能看到
+        val loadNotice = NarrativeMessage(
+            id = 0L,
+            content = "**存档已加载**\n\n你回到了${state.world.currentLocation}，时间是${state.world.currentTime}。\n\n命运之轮继续转动...",
+            isSystem = true
+        )
+
+        return history + loadNotice
     }
 
     /**

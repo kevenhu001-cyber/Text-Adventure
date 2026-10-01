@@ -5,14 +5,16 @@ import com.mysteriousjourney.data.model.Message
 import com.mysteriousjourney.domain.model.ChatMessage
 import com.mysteriousjourney.domain.model.GameConfig
 import com.mysteriousjourney.domain.model.GameState
-import com.mysteriousjourney.domain.model.Money
 import com.mysteriousjourney.domain.model.OpeningScenario
 import com.mysteriousjourney.domain.model.OpeningScenarios
 import com.mysteriousjourney.domain.model.PlayerState
 import com.mysteriousjourney.domain.model.WorldState
 import com.mysteriousjourney.util.StateParser
+import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
 
 /**
  * 游戏引擎核心类
@@ -21,21 +23,31 @@ import kotlinx.coroutines.withContext
 class GameEngine constructor(
     private val aiApiService: AiApiService
 ) {
+    private companion object {
+        /** 系统提示词里各类状态数据的展示上限，控制提示词体积不随游戏时长膨胀 */
+        const val INVENTORY_LIMIT = 20
+        const val KNOWLEDGE_LIMIT = 12
+        const val STATUS_LIMIT = 10
+        const val ABILITY_LIMIT = 10
+        const val SEALED_LIMIT = 10
+        const val LOCATION_LIMIT = 12
+        const val RELATION_LIMIT = 12
+        const val MEMORY_LIMIT = 10
+
+        /** 聊天历史保留上限：20 轮 = 40 条消息 */
+        const val MAX_CHAT_MESSAGES = 40
+
+        /** 聊天历史总字符上限，防止单轮超长响应把存档撑爆 */
+        const val MAX_CHAT_CHARS = 12_000
+    }
+
     // 当前游戏状态
     private var gameState: GameState = GameConfig.INITIAL_GAME_STATE
-    
-    // 系统提示词
-    private val systemPrompt: String
-        get() = buildSystemPrompt()
-    
+
     /**
      * 获取当前游戏状态
      */
     fun getGameState(): GameState = gameState
-    
-    fun applyStateUpdate(stateUpdate: StateParser.StateUpdate) {
-        updateGameState(stateUpdate)
-    }
     
     /**
      * 初始化游戏
@@ -87,54 +99,46 @@ class GameEngine constructor(
     }
     
     /**
-     * 处理玩家输入
-     * @param playerInput 玩家的自然语言输入
-     * @return 处理结果，包含叙事文本和是否成功
+     * 推进一个回合：流式获取 AI 叙事，并在流结束后统一落地状态。
+     *
+     * 事件顺序固定为若干 [TurnEvent.Chunk]，最后一个 [TurnEvent.Completed]。
+     * 消费方只需在 collect 正常结束后提交最终 UI 状态，
+     * 从协议上排除了"迟到的中间帧覆盖最终结果"的可能。
      */
-    suspend fun processPlayerInput(playerInput: String): ProcessResult = withContext(Dispatchers.IO) {
-        // 构建聊天历史
-        val chatHistory = buildChatHistory()
-        
-        // 调用AI API（流式版本）
-        val result = aiApiService.sendGameMessageStream(
-            systemPrompt = systemPrompt,
-            chatHistory = chatHistory,
-            userInput = playerInput
-        ) { chunk ->
-            // 流式回调暂时不处理，因为GameEngine需要完整结果
+    fun streamTurn(userInput: String): Flow<TurnEvent> = channelFlow {
+        val buffer = StringBuilder()
+
+        aiApiService.streamGameMessage(
+            systemPrompt = buildSystemPrompt(),
+            chatHistory = buildChatHistory(),
+            userInput = userInput
+        ).collect { chunk ->
+            buffer.append(chunk)
+            // 用 trySend 而非 emit：这里身处内层流的 collect 回调，
+            // flow{} 的 emit 会被 Flow invariant 校验拒绝
+            trySend(TurnEvent.Chunk(chunk))
         }
-        
-        result.fold(
-            onSuccess = { aiResponse ->
-                // 解析AI响应
-                val parseResult = StateParser.parseResponse(aiResponse)
-                val narrative = parseResult.narrative
-                val stateUpdate = parseResult.stateUpdate
-                
-                // 更新游戏状态
-                if (stateUpdate != null) {
-                    updateGameState(stateUpdate)
-                }
-                
-                // 添加到聊天历史
-                addToChatHistory(playerInput, aiResponse)
-                
-                ProcessResult(
-                    narrative = narrative,
-                    success = true,
-                    error = null,
-                    consistencyScore = parseResult.consistencyScore
-                )
-            },
-            onFailure = { error ->
-                ProcessResult(
-                    narrative = "",
-                    success = false,
-                    error = error.message ?: "未知错误",
-                    consistencyScore = 0
-                )
-            }
-        )
+
+        val fullText = buffer.toString()
+
+        val stateUpdate = StateParser.parseStateUpdate(fullText)
+        if (stateUpdate != null) {
+            updateGameState(stateUpdate)
+        }
+
+        addToChatHistory(playerInput = userInput, aiResponse = fullText)
+        trySend(TurnEvent.Completed(fullText))
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * 单个回合内向外广播的事件
+     */
+    sealed interface TurnEvent {
+        /** 一段增量叙事文本，顺序与 AI 返回顺序一致 */
+        data class Chunk(val text: String) : TurnEvent
+
+        /** 整轮结束，[fullText] 为含状态标记的完整原始响应 */
+        data class Completed(val fullText: String) : TurnEvent
     }
     
     /**
@@ -158,18 +162,18 @@ ${GameConfig.SYSTEM_PROMPT}
 - 疯狂值：${player.sanity.madnessValue}
 - 污染程度：${player.sanity.corruptionLevel}
 - 金钱：${player.money.goldPounds}金镑 ${player.money.soles}苏勒 ${player.money.pence}便士
-- 物品：${player.inventory.joinToString("、")}
-- 知识：${player.knowledge.joinToString("、")}
-- 状态效果：${if (player.statusEffects.isEmpty()) "无" else player.statusEffects.joinToString("、")}
-- 能力：${if (player.abilities.isEmpty()) "无" else player.abilities.joinToString(", ") { "${it.name}(等级${it.level})" }}
-- 封印物品：${if (player.sealedItems.isEmpty()) "无" else player.sealedItems.joinToString(", ") { "${it.name}(${if(it.active) "激活" else "休眠"})" }}
+- 物品：${player.inventory.renderPromptList(INVENTORY_LIMIT)}
+- 知识：${player.knowledge.renderPromptList(KNOWLEDGE_LIMIT)}
+- 状态效果：${player.statusEffects.renderPromptList(STATUS_LIMIT)}
+- 能力：${player.abilities.renderPromptList(ABILITY_LIMIT) { "${it.name}(等级${it.level})" }}
+- 封印物品：${player.sealedItems.renderPromptList(SEALED_LIMIT) { "${it.name}(${if(it.active) "激活" else "休眠"})" }}
 
 【当前世界状态】
 - 当前时间：${world.currentTime}
 - 当前位置：${world.currentLocation}
 - 天气：${world.weather}
-- 已探索地点：${world.visitedLocations.joinToString("、")}
-- NPC关系：${if (player.npcRelations.isEmpty()) "无" else player.npcRelations.map { "${it.key}:${it.value}" }.joinToString(", ")}
+- 已探索地点：${world.visitedLocations.renderPromptList(LOCATION_LIMIT)}
+- NPC关系：${player.npcRelations.renderPromptList(RELATION_LIMIT) { "${it.key}:${it.value}" }}
 
 【当前任务】
 ${if (world.openQuests.isEmpty()) "暂无进行中的任务" else world.openQuests.map { "- ${it.name}: ${it.description} (${it.status})" }.joinToString("\n")}
@@ -178,12 +182,26 @@ ${if (world.openQuests.isEmpty()) "暂无进行中的任务" else world.openQues
 ${player.factionRelations.map { "- ${it.key}: ${it.value}" }.joinToString("\n")}
 
 【核心叙事记忆】
-${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMemory.map { "- $it" }.joinToString("\n")}
+${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMemory.renderPromptList(MEMORY_LIMIT) { "- $it" }}
 
-【重要】：确保你的回复与上述状态信息完全吻合，不要出现矛盾。叙事要基于当前的位置和状态展开，并提供有意义的选择，让玩家能够影响故事的发展方向。
+以上是既成事实，不得矛盾。写正文时不要复述这些信息，只在剧情需要时让它们自然登场。
 """.trimIndent()
     }
-    
+
+    /**
+     * 把列表拼进系统提示词，超过上限时只保留最近若干项，并显式说明被截断。
+     *
+     * 状态块如果完全不加限制，玩得越久系统提示词就越长，开头的风格规则会被越埋越深，
+     * 最终导致"改了提示词但玩到后面文风又飘回去"。这里给每类数据设上限来兜住提示词体积。
+     * 明写"另有 N 项未列出"比静默截断更重要——否则 AI 会以为玩家身上就只有列出的这几样。
+     */
+    private fun <T> List<T>.renderPromptList(limit: Int, transform: (T) -> String = { it.toString() }): String {
+        if (isEmpty()) return "无"
+        val shown = if (size <= limit) this else takeLast(limit)
+        val body = shown.joinToString("、", transform = transform)
+        return if (shown.size < size) "$body（另有 ${size - shown.size} 项未列出）" else body
+    }
+
     /**
      * 构建聊天历史
      * 将GameState中的聊天历史转换为API所需的Message格式
@@ -198,12 +216,16 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
     }
     
     /**
-     * 添加消息到聊天历史
+     * 添加消息到聊天历史。
+     *
+     * 历史会随回合数无限增长，而它整体会被序列化进存档。
+     * 这里只保留最近若干轮：[AiApiService] 下发给模型的本来也就是最后 12 条，
+     * 更早的内容从不进入 AI 上下文，因此裁剪不会影响叙事连贯性。
      */
     fun addToChatHistory(playerInput: String, aiResponse: String) {
         val currentTime = System.currentTimeMillis()
-        
-        val newHistory = gameState.chatHistory + listOf(
+
+        val newHistory = (gameState.chatHistory + listOf(
             ChatMessage(
                 role = Message.ROLE_USER,
                 content = playerInput,
@@ -214,9 +236,24 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
                 content = aiResponse,
                 timestamp = currentTime + 1
             )
-        )
-        
+        )).let { trimToRecent(it) }
+
         gameState = gameState.copy(chatHistory = newHistory)
+    }
+
+    /**
+     * 按轮数与总字符数双重裁剪聊天历史，优先保留最近的内容。
+     */
+    private fun trimToRecent(history: List<ChatMessage>): List<ChatMessage> {
+        var trimmed = if (history.size > MAX_CHAT_MESSAGES) history.takeLast(MAX_CHAT_MESSAGES) else history
+
+        var totalChars = trimmed.sumOf { it.content.length }
+        while (totalChars > MAX_CHAT_CHARS && trimmed.size > 2) {
+            val dropped = trimmed.first()
+            trimmed = trimmed.drop(1)
+            totalChars -= dropped.content.length
+        }
+        return trimmed
     }
     
     /**
@@ -233,8 +270,11 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
         
         val newSpirituality = when {
             spiritUpdate != null -> {
+                // 上限随序列晋升提升。只接受"变大"，避免 AI 误写导致上限回退。
+                val newMax = maxOf(currentPlayer.spirituality.max, spiritUpdate.max)
                 currentPlayer.spirituality.copy(
-                    current = spiritUpdate.current.coerceIn(0, currentPlayer.spirituality.max)
+                    current = spiritUpdate.current.coerceIn(0, newMax),
+                    max = newMax
                 )
             }
             spiritChange != null -> {
@@ -258,31 +298,15 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
         val updatedPlayer = currentPlayer.copy(
             spirituality = newSpirituality,
             sanity = currentPlayer.sanity.copy(madnessValue = newMadness),
-            money = stateUpdate.money?.toMoney(currentPlayer.money) ?: currentPlayer.money,
-            statusEffects = stateUpdate.statusEffects ?: currentPlayer.statusEffects
+            money = stateUpdate.money?.toMoney() ?: currentPlayer.money,
+            statusEffects = stateUpdate.statusChanges
+                ?.let { applyItemChanges(currentPlayer.statusEffects, it) }
+                ?: currentPlayer.statusEffects
         )
-        
-        val updatedInventory = if (stateUpdate.inventoryChanges != null) {
-            val (added, removed) = StateParser.parseInventoryChanges(stateUpdate.inventoryChanges!!)
-            val newInventory = currentPlayer.inventory.toMutableList()
-            
-            removed.forEach { item ->
-                val index = newInventory.indexOfFirst { it == item }
-                if (index != -1) {
-                    newInventory.removeAt(index)
-                } else {
-                    val fuzzyIndex = newInventory.indexOfFirst { it.contains(item, ignoreCase = true) }
-                    if (fuzzyIndex != -1) {
-                        newInventory.removeAt(fuzzyIndex)
-                    }
-                }
-            }
-            
-            newInventory.addAll(added)
-            newInventory
-        } else {
-            currentPlayer.inventory
-        }
+
+        val updatedInventory = stateUpdate.inventoryChanges
+            ?.let { applyItemChanges(currentPlayer.inventory, it) }
+            ?: currentPlayer.inventory
         
         val updatedWorld = currentWorld.copy(
             currentLocation = stateUpdate.location ?: currentWorld.currentLocation,
@@ -310,59 +334,37 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
             gameMemory = updatedMemory
         )
     }
-    
+
     /**
-     * 执行冥想恢复灵性
-     * @param hours 冥想时长（小时）
-     * @return 恢复的灵性值
+     * 对一个字符串列表施加 [StateParser.ItemChanges] 增删。
+     *
+     * 删除时先精确匹配；匹配不到才退化为模糊匹配，并取"名称最接近"的那个
+     * （长度差最小），而不是列表里第一个命中的——
+     * 否则"失去钥匙"会优先吃掉"黄铜钥匙"，而真正想丢的可能是"神秘钥匙"。
      */
-    fun meditate(hours: Int = 1): Int {
-        val player = gameState.player
-        val recoveryRate = 10 // 每小时恢复10点灵性
-        val recovered = (recoveryRate * hours).coerceAtMost(
-            player.spirituality.max - player.spirituality.current
-        )
-        
-        gameState = gameState.copy(
-            player = player.copy(
-                spirituality = player.spirituality.copy(
-                    current = player.spirituality.current + recovered
-                )
-            )
-        )
-        
-        return recovered
-    }
-    
-    /**
-     * 检查玩家是否处于危险状态
-     */
-    fun isPlayerInDanger(): Boolean {
-        val player = gameState.player
-        return player.spirituality.current < 20 ||
-                player.sanity.madnessValue > GameConfig.GameRules.MADNESS_THRESHOLD_HIGH
-    }
-    
-    /**
-     * 获取玩家状态摘要
-     */
-    fun getPlayerStatusSummary(): String {
-        val player = gameState.player
-        return buildString {
-            append("灵性: ${player.spirituality.current}/${player.spirituality.max}")
-            append(" | 疯狂: ${player.sanity.madnessValue}")
-            append(" | 金钱: ${player.money.goldPounds}金镑")
-            append(" | 位置: ${gameState.world.currentLocation}")
+    private fun applyItemChanges(current: List<String>, changes: StateParser.ItemChanges): List<String> {
+        val result = current.toMutableList()
+
+        changes.removed.forEach { item ->
+            val exact = result.indexOf(item)
+            if (exact != -1) {
+                result.removeAt(exact)
+                return@forEach
+            }
+
+            val fuzzy = result.indices
+                .filter { result[it].contains(item, ignoreCase = true) }
+                .minByOrNull { abs(result[it].length - item.length) }
+            if (fuzzy != null) {
+                result.removeAt(fuzzy)
+            }
         }
+
+        changes.added
+            .filter { it.isNotBlank() }
+            .forEach { item -> if (!result.contains(item)) result += item }
+
+        return result
     }
     
-    /**
-     * 处理结果数据类
-     */
-    data class ProcessResult(
-        val narrative: String,
-        val success: Boolean,
-        val error: String?,
-        val consistencyScore: Int = 100 // 新增：一致性评分
-    )
 }

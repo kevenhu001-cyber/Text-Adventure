@@ -9,11 +9,10 @@
 - **AI 驱动叙事**：接入任意 OpenAI 兼容端点，SSE 流式输出 + 打字机效果
 - **多开场剧本**：多个可选开局（含难度分级与彩蛋剧本），从穿越者到外神化身
 - **状态系统**：灵性、疯狂值、污染度、三级货币（金镑/苏勒/便士）、背包、状态效果
-- **数值反馈**：AI 响应中的 `{spirituality:80/100}` 等标记由 `StateParser` 解析并落到游戏状态；自然语言（"灵性大量消耗"）也能被识别
+- **数值反馈**：AI 响应中的 `{spirituality:80/100}` 等标记由 `StateParser` 解析并落到游戏状态；自然语言（"灵性大量消耗"）也能被识别，同一回合内"消耗"与"恢复"会分别取值后相抵
 - **选择分支**：每段叙事附带 2-4 个【选择】，导向不同剧情走向
-- **一致性评分**：`StateParser` 对 AI 响应的标记完整性、长度、逻辑冲突打分
 - **记忆系统**：`gameMemory` 关键剧情记忆 + 超长对话自动压缩摘要
-- **存档系统**：DataStore + Gson JSON 存档，最多 20 个存档位
+- **存档系统**：DataStore + Gson JSON 存档，最多 20 个存档位；读档会连同对话记录一起恢复
 - **角色详情**：点击状态栏查看属性、装备、关系、命运节点等增强角色面板
 
 ## 技术架构
@@ -28,12 +27,17 @@
 
 | 组件 | 职责 |
 | --- | --- |
-| `GameEngine` | 游戏核心：系统提示词构建、状态更新、冥想/危险判定 |
-| `AiApiService` | OpenAI 兼容 API 调用（流式/非流式）、对话历史压缩 |
-| `GameViewModel` | UI 状态管理（StateFlow）、流式响应拼装、存档读写 |
+| `GameEngine` | 游戏核心：系统提示词构建、回合编排（`streamTurn`）、状态落地 |
+| `AiApiService` | OpenAI 兼容 API 调用（SSE 以 `Flow<String>` 按序输出增量文本）、对话历史压缩 |
+| `GameViewModel` | UI 状态管理（StateFlow）、流式渲染节流、存档读写 |
 | `StateParser` | 解析 AI 响应中的状态标记与自然语言数值变化 |
 | `ChoiceParser` | 解析【选择】分支选项 |
 | `SaveRepository` | 存档的保存/加载/删除（JSON 存储） |
+
+> 回合流程：`GameViewModel.sendMessage()` 单一入口收集 `GameEngine.streamTurn()` 的
+> `Flow<TurnEvent>`，流结束后统一提交最终 UI 状态。
+> 自由输入 / 推进剧情 / 选择分支三个入口共用这条路径，
+> 因此不存在"迟到的流式中间帧覆盖最终结果"的情况。
 
 ### 状态标记协议
 
@@ -72,8 +76,53 @@ AI 响应需包含以下格式标记：
 1. 安装 Android SDK（`local.properties` 中的 `sdk.dir` 指向本机 SDK）
 2. 在 Android Studio 中打开项目，同步 Gradle
 3. 连接设备或启动模拟器，运行 `app`
-4. 命令行构建：`gradlew.bat :app:assembleDebug`
-5. 运行单元测试：`gradlew.bat :app:testDebugUnitTest`
+4. 命令行构建：`gradlew.bat :app:assembleDebug`（macOS/Linux 用 `./gradlew`）
+5. 运行单元测试：`./gradlew :app:testDebugUnitTest`
+
+## 发布 Release（GitHub Actions）
+
+仓库内置 `.github/workflows/android-release.yml`，推 `v*` 标签即自动产出已签名的 Release 安装包。
+构建环境固定为 JDK 17（AGP 8.13 要求）+ compileSdk 34。
+
+### 1. 生成签名密钥（只需一次，务必自己保管好）
+
+```bash
+keytool -genkeypair -v -keystore release.jks -alias mysteriousjourney \
+        -keyalg RSA -keysize 2048 -validity 10000
+```
+
+> 这个 `.jks` **丢了就再也无法给同一个应用发布更新**（Android 不允许用不同密钥覆盖安装），
+> 请离线备份，不要提交进仓库。
+
+### 2. 配置仓库 Secrets
+
+在 **Settings → Secrets and variables → Actions → New repository secret** 中添加 4 个：
+
+| Secret | 内容 |
+| --- | --- |
+| `KEYSTORE_BASE64` | Linux/macOS：`base64 -i release.jks`（Windows PowerShell：`[Convert]::ToBase64String([IO.File]::ReadAllBytes("release.jks"))`） |
+| `KEY_ALIAS` | 上面 `-alias` 填的值，如 `mysteriousjourney` |
+| `KEYSTORE_PASSWORD` | 创建 `.jks` 时设置的密码 |
+| `KEY_PASSWORD` | 同上（未单独设置时与 store 密码一致） |
+
+### 3. 发版
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+流水线会依次：还原密钥 → 跑单元测试 → 构建已签名 APK → 自动创建 GitHub Release
+（安装包 `Text-Adventure-v1.0.0.apk`，附上 tag 区间的提交记录）。
+
+`versionName` / `versionCode` 由标签自动推导（`v1.2.3` → versionName `1.2.3`、versionCode `10203`），
+本地构建不带这些参数时仍回落到 `1.0.0`。
+
+也可以在 **Actions 页面 → Android Release → Run workflow** 手动触发，
+适合不想打正式标签时出预览包。
+
+> 缺少任一 Secret 时流水线会**直接失败并提示缺哪个**，不会产出未签名的包——
+> 未签名的 APK 无法安装，装了也是白装。
 
 ## 故障排除
 

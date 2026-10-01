@@ -6,6 +6,10 @@ import com.mysteriousjourney.data.settings.CustomModelConfig
 import com.mysteriousjourney.data.settings.SettingsRepository
 import com.mysteriousjourney.domain.model.GameConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -67,25 +71,91 @@ class AiApiService {
     }
 
     /**
-     * 发送游戏消息到AI (流式版本)
+     * 发送游戏消息到 AI（流式版本）。
+     *
+     * 以 [Flow] 按到达顺序输出增量文本。相较回调式接口，这样做有两个关键收益：
+     *  1. 消费方在同一个协程里顺序消费，不会出现乱序或迟到的中间帧覆盖最终结果；
+     *  2. 协程被取消时 [awaitClose] 会取消底层 OkHttp Call，
+     *     阻塞中的 socket 读取能立刻抛异常退出，不会泄漏连接。
      */
-    suspend fun sendGameMessageStream(
+    fun streamGameMessage(
         systemPrompt: String,
         chatHistory: List<Message>,
-        userInput: String,
-        onChunk: (String) -> Unit
-    ): Result<String> = withContext(Dispatchers.IO) {
+        userInput: String
+    ): Flow<String> = channelFlow {
         val config = currentConfig
         if (config == null || !config.isValid()) {
-            return@withContext Result.failure(
-                Exception("尚未配置 AI 模型，请在「设置」中填写 API 地址、模型 ID 和 Key")
-            )
+            throw IllegalStateException("尚未配置 AI 模型，请在「设置」中填写 API 地址、模型 ID 和 Key")
         }
-        return@withContext try {
-            val messages = buildMessages(systemPrompt, chatHistory, userInput)
-            Result.success(callChatCompletionStream(config, messages, onChunk))
+
+        val requestBody = JSONObject().apply {
+            put("model", config.modelId)
+            put("messages", buildMessages(systemPrompt, chatHistory, userInput))
+            put("temperature", 0.8)
+            put("max_tokens", 8192)
+            put("stream", true)
+            put("top_p", 0.95)
+            put("frequency_penalty", 0.2)
+            put("presence_penalty", 0.2)
+        }.toString().toRequestBody(jsonMediaType)
+
+        val request = Request.Builder()
+            .url(config.apiUrl)
+            .addHeader("Authorization", "Bearer ${config.apiKey}")
+            .addHeader("Content-Type", "application/json")
+            .post(requestBody)
+            .build()
+
+        val call = client.newCall(request)
+        call.enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                close(e)
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                try {
+                    response.use { resp ->
+                        if (!resp.isSuccessful) {
+                            val detail = resp.body?.string() ?: "无错误详情"
+                            close(IllegalStateException("API调用失败: ${resp.code} ${resp.message}, 详情: $detail"))
+                            return@use
+                        }
+
+                        val source = resp.body?.source()
+                            ?: throw IllegalStateException("API 响应体为空")
+
+                        // SSE：逐行读取 data: 事件，遇到 [DONE] 立即结束
+                        // （必须真正 break 掉读取循环，否则会一直阻塞到服务端关闭连接）
+                        while (true) {
+                            val line = source.readUtf8Line() ?: break
+                            if (!line.startsWith("data:")) continue
+                            val data = line.removePrefix("data:").trim()
+                            if (data == "[DONE]") break
+                            extractDeltaContent(data)?.let { trySend(it) }
+                        }
+                    }
+                    close()
+                } catch (e: Throwable) {
+                    close(e)
+                }
+            }
+        })
+
+        awaitClose { call.cancel() }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * 从单条 SSE data 载荷中取出增量文本，格式不符合预期时返回 null 并跳过。
+     */
+    private fun extractDeltaContent(data: String): String? {
+        return try {
+            val choices = JSONObject(data).optJSONArray("choices") ?: return null
+            if (choices.length() == 0) return null
+            val delta = choices.getJSONObject(0).optJSONObject("delta") ?: return null
+            delta.optString("content", "").takeIf { it.isNotEmpty() && it != "null" }
         } catch (e: Exception) {
-            Result.failure(e)
+            // 个别分片解析失败不影响整体，静默跳过
+            null
         }
     }
 
@@ -115,7 +185,18 @@ class AiApiService {
         userInput: String
     ): JSONArray {
         val messages = JSONArray()
-        val effectivePrompt = if (systemPrompt.isNotEmpty()) systemPrompt else GameConfig.SYSTEM_PROMPT
+        val compressedHistory = compressChatHistory(chatHistory)
+
+        // 旧对话摘要是以 role="system" 单独插进消息数组的，
+        // 但部分 OpenAI 兼容端点只接受首条 system 消息，中途插入会直接报错。
+        // 这里改为并进主 system prompt，兼容性更好，语义也没有损失。
+        val historySummary = compressedHistory.firstOrNull { it.role == Message.ROLE_SYSTEM }
+        val basePrompt = if (systemPrompt.isNotEmpty()) systemPrompt else GameConfig.SYSTEM_PROMPT
+        val effectivePrompt = if (historySummary != null) {
+            "$basePrompt\n\n${historySummary.content}"
+        } else {
+            basePrompt
+        }
 
         messages.put(
             JSONObject().apply {
@@ -124,10 +205,9 @@ class AiApiService {
             }
         )
 
-        val compressedHistory = compressChatHistory(chatHistory)
-
-        for (i in compressedHistory.indices) {
-            val message = compressedHistory[i]
+        for (message in compressedHistory) {
+            // 摘要已经并进 system prompt，这里跳过，避免在消息数组中间出现第二条 system
+            if (message.role == Message.ROLE_SYSTEM) continue
             messages.put(
                 JSONObject().apply {
                     put("role", message.role)
@@ -136,6 +216,7 @@ class AiApiService {
             )
         }
 
+        // 本轮玩家输入尚未写入 chatHistory，必须作为最后一条 user 消息下发
         messages.put(
             JSONObject().apply {
                 put("role", "user")
@@ -197,91 +278,6 @@ class AiApiService {
     }
 
     /**
-     * OpenAI 兼容 API 流式调用（SSE）
-     */
-    private suspend fun callChatCompletionStream(
-        config: CustomModelConfig,
-        messages: JSONArray,
-        onChunk: (String) -> Unit
-    ): String = suspendCancellableCoroutine { continuation ->
-        val requestBody = JSONObject().apply {
-            put("model", config.modelId)
-            put("messages", messages)
-            put("temperature", 0.8)
-            put("max_tokens", 8192)
-            put("stream", true)
-            put("top_p", 0.95)
-            put("frequency_penalty", 0.2)
-            put("presence_penalty", 0.2)
-            put("response_format", JSONObject().put("type", "text"))
-        }.toString().toRequestBody(jsonMediaType)
-
-        val request = Request.Builder()
-            .url(config.apiUrl)
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .addHeader("Content-Type", "application/json")
-            .post(requestBody)
-            .build()
-
-        client.newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: IOException) {
-                continuation.resumeWithException(e)
-            }
-
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                response.use {
-                    if (!response.isSuccessful) {
-                        val errorBody = response.body?.string() ?: "无错误详情"
-                        continuation.resumeWithException(
-                            Exception("API调用失败: ${response.code} ${response.message}, 详情: $errorBody")
-                        )
-                        return
-                    }
-
-                    try {
-                        val responseBody = response.body ?: return
-                        val reader = responseBody.charStream()
-                        val fullContent = StringBuilder()
-
-                        reader.useLines { lines ->
-                            lines.forEach { line ->
-                                if (line.trim().isNotEmpty() && line.startsWith("data: ")) {
-                                    val data = line.substring(6).trim()
-                                    if (data == "[DONE]") {
-                                        return@useLines
-                                    }
-
-                                    try {
-                                        val jsonData = JSONObject(data)
-                                        val choices = jsonData.optJSONArray("choices")
-                                        if (choices != null && choices.length() > 0) {
-                                            val choice = choices.getJSONObject(0)
-                                            val delta = choice.optJSONObject("delta")
-                                            if (delta != null) {
-                                                val content = delta.optString("content", "")
-                                                if (content.isNotEmpty() && content != "null") {
-                                                    fullContent.append(content)
-                                                    onChunk(content)
-                                                }
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        println("解析流式数据失败: ${e.message}")
-                                    }
-                                }
-                            }
-                        }
-
-                        continuation.resume(fullContent.toString())
-                    } catch (e: Exception) {
-                        continuation.resumeWithException(e)
-                    }
-                }
-            }
-        })
-    }
-
-    /**
      * OpenAI 兼容 API 非流式调用（用于连接测试等短请求）
      */
     private suspend fun callChatCompletion(
@@ -302,7 +298,10 @@ class AiApiService {
             .post(requestBody)
             .build()
 
-        client.newCall(request).enqueue(object : okhttp3.Callback {
+        val call = client.newCall(request)
+        // 协程被取消时同步取消请求，避免连接泄漏
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: IOException) {
                 continuation.resumeWithException(e)
             }
