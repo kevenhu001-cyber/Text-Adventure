@@ -50,29 +50,42 @@ jobs:
       - name: 配置 Gradle 缓存
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 配置 Android SDK
+      - name: 配置 Android SDK 并安装组件
         # ubuntu-latest 自带 commandline-tools，不使用 android-actions/setup-android：
         # 该动作会尝试安装已被 Google 移除的 'tools' 包，导致 sdkmanager 退出码 1。
+        #
+        # 注意 ANDROID_SDK_ROOT 与 ANDROID_HOME 必须在这里一次性设全并导出：
+        # 早先只设了 ANDROID_HOME，下一步读 ANDROID_SDK_ROOT 得到空串，glob 匹配不到 sdkmanager。
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "SDK 根目录: $SDK_ROOT"
-          ls "$SDK_ROOT/cmdline-tools" || true
 
-      - name: 接受 SDK 许可并安装所需组件
-        run: |
-          set -euo pipefail
-          SDKMANAGER="$(ls -d "${ANDROID_SDK_ROOT}"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          SDKMANAGER=""
+          for candidate in \
+            "$SDK_ROOT"/cmdline-tools/latest/bin/sdkmanager \
+            "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager \
+            "$SDK_ROOT"/tools/bin/sdkmanager; do
+            if [ -x "$candidate" ] || [ -f "$candidate" ]; then
+              SDKMANAGER="$candidate"
+              break
+            fi
+          done
+
           if [ -z "$SDKMANAGER" ]; then
-            echo "::error::找不到 sdkmanager，ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+            echo "::error::在 $SDK_ROOT 下找不到 sdkmanager"
+            find "$SDK_ROOT" -maxdepth 3 -name sdkmanager 2>/dev/null || true
             exit 1
           fi
           chmod +x "$SDKMANAGER"
+          echo "使用 sdkmanager: $SDKMANAGER"
+
           # 许可需在安装组件之前接受，否则 sdkmanager 会拒绝继续
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
           "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "SDK 组件安装完成"
 
       - name: 解析版本号
