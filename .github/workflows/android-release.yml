@@ -169,8 +169,18 @@ jobs:
             LISTING=$(keytool -list -keystore release.jks -storepass "$STORE_PASS" 2>/dev/null)
             ALIAS=$(echo "$LISTING" | grep -oE 'Alias name: .+' | head -1 | sed 's/^Alias name: //' | tr -d '[:space:]')
             if [ -z "$ALIAS" ]; then
-              # 新格式：取 "Your keystore contains ..." 之后的第一行，逗号前的部分
-              ALIAS=$(echo "$LISTING" | grep -A1 -E '^Your keystore contains' | tail -1 | cut -d',' -f1 | tr -d '[:space:]')
+              # 新格式：跳过 "Your keystore contains ..." 与别名行之间的空行，
+              # 取其后第一条非空行的逗号前部分。
+              # 注意不能用 grep -A1 —— keytool 输出的下一行是空行。
+              ALIAS=$(echo "$LISTING" | awk '
+                /^Your keystore contains/ { seen=1; next }
+                seen && /^[[:space:]]*$/ { next }
+                seen {
+                  sub(/,.*$/, "")
+                  gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                  print
+                  exit
+                }')
             fi
           fi
           if [ -z "$ALIAS" ]; then
