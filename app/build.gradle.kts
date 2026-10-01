@@ -1,7 +1,16 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+val signingPropsFile = rootProject.file("key.properties")
+val signingProps = Properties().apply {
+    if (signingPropsFile.exists()) load(FileInputStream(signingPropsFile))
+}
+val hasSigningConfig = signingPropsFile.exists()
 
 android {
     namespace = "com.mysteriousjourney"
@@ -20,9 +29,23 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasSigningConfig) {
+            create("release") {
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+                storeFile = file(signingProps.getProperty("storeFile"))
+                storePassword = signingProps.getProperty("storePassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

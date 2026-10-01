@@ -422,6 +422,23 @@ private fun ChoiceButtons(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(bottom = 2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .background(GoldPrimary, androidx.compose.foundation.shape.CircleShape)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "抉择",
+                    color = GoldPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             choices.forEachIndexed { index, choice ->
                 androidx.compose.animation.AnimatedVisibility(
                     visible = true,

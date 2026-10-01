@@ -140,9 +140,9 @@ class GameViewModel : ViewModel() {
                     isGameInitialized = true,
                     isLoading = false,
                     messages = listOf(welcomeMessage),
-                    choices = parseResult.choices,
-                    pendingChoices = parseResult.choices,
-                    showChoices = parseResult.choices.isNotEmpty(),
+                    choices = ensureChoices(parseResult.choices),
+                    pendingChoices = ensureChoices(parseResult.choices),
+                    showChoices = true,
                     spirit = currentState.player.spirituality.current,
                     maxSpirit = currentState.player.spirituality.max,
                     madness = currentState.player.sanity.madnessValue,
@@ -161,6 +161,18 @@ class GameViewModel : ViewModel() {
             }
         }
     }
+
+    /**
+     * 解析结果兜底：AI 未输出任何【选择】时注入默认选项，
+     * 保证选择按钮始终可用，不会让界面卡在没有可操作入口的状态。
+     */
+    private fun ensureChoices(parsed: List<ChoiceParser.Choice>): List<ChoiceParser.Choice> =
+        if (parsed.isNotEmpty()) parsed
+        else listOf(
+            ChoiceParser.Choice(1, "继续推进剧情"),
+            ChoiceParser.Choice(2, "仔细观察四周"),
+            ChoiceParser.Choice(3, "检查随身物品")
+        )
 
     fun onTypewriterComplete() {
         _uiState.update {
@@ -258,7 +270,7 @@ class GameViewModel : ViewModel() {
                             isLoading = false,
                             messages = it.messages.dropLast(1) + finalAiMessage,
                             choices = emptyList(),
-                            pendingChoices = parseResult.choices,
+                            pendingChoices = ensureChoices(parseResult.choices),
                             showChoices = false,
                             isTypewriterRunning = true,
                             spirit = currentState.player.spirituality.current,
@@ -376,7 +388,7 @@ class GameViewModel : ViewModel() {
                             isLoading = false,
                             messages = updatedMessages,
                             choices = emptyList(),
-                            pendingChoices = parseResult.choices,
+                            pendingChoices = ensureChoices(parseResult.choices),
                             showChoices = false,
                             isTypewriterRunning = true,
                             spirit = currentState.player.spirituality.current,
@@ -499,7 +511,7 @@ class GameViewModel : ViewModel() {
                             isLoading = false,
                             messages = updatedMessages,
                             choices = emptyList(),
-                            pendingChoices = parseResult.choices,
+                            pendingChoices = ensureChoices(parseResult.choices),
                             showChoices = false,
                             isTypewriterRunning = true,
                             spirit = currentState.player.spirituality.current,
