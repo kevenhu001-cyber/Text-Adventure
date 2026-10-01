@@ -194,8 +194,10 @@ jobs:
           KEY_PASS="${KEY_PASSWORD:-$STORE_PASS}"
 
           # 用 printf 而非 heredoc：YAML run 块里的缩进会让 <<EOF 终止符无法匹配
-          printf 'storeFile=release.jks\nkeyAlias=%s\nstorePassword=%s\nkeyPassword=%s\n' \
-            "$ALIAS" "$STORE_PASS" "$KEY_PASS" > key.properties
+          # storeFile 必须写绝对路径：app/build.gradle.kts 里 file() 按 app/ 模块目录解析，
+          # 相对路径 release.jks 会去找 app/release.jks，而 jks 实际在仓库根目录。
+          printf 'storeFile=%s/release.jks\nkeyAlias=%s\nstorePassword=%s\nkeyPassword=%s\n' \
+            "$GITHUB_WORKSPACE" "$ALIAS" "$STORE_PASS" "$KEY_PASS" > key.properties
 
           echo "别名: $ALIAS"
           [ -n "$KEY_PASSWORD" ] && echo "key 密码: 已单独提供" || echo "key 密码: 复用 store 密码"

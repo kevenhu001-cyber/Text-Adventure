@@ -32,6 +32,8 @@ class GameEngine constructor(
         const val SEALED_LIMIT = 10
         const val LOCATION_LIMIT = 12
         const val RELATION_LIMIT = 12
+        const val FACTION_LIMIT = 12
+        const val QUEST_LIMIT = 8
         const val MEMORY_LIMIT = 10
 
         /** 聊天历史保留上限：20 轮 = 40 条消息 */
@@ -176,10 +178,10 @@ ${GameConfig.SYSTEM_PROMPT}
 - NPC关系：${player.npcRelations.renderPromptList(RELATION_LIMIT) { k, v -> "$k:$v" }}
 
 【当前任务】
-${if (world.openQuests.isEmpty()) "暂无进行中的任务" else world.openQuests.map { "- ${it.name}: ${it.description} (${it.status})" }.joinToString("\n")}
+${world.openQuests.renderPromptLines(QUEST_LIMIT, "暂无进行中的任务") { "- ${it.name}: ${it.description} (${it.status})" }}
 
 【势力关系】
-${player.factionRelations.map { "- ${it.key}: ${it.value}" }.joinToString("\n")}
+${player.factionRelations.entries.toList().renderPromptLines(FACTION_LIMIT, "暂无") { "- ${it.key}: ${it.value.status}（声望${it.value.reputation}）" }}
 
 【核心叙事记忆】
 ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMemory.renderPromptList(MEMORY_LIMIT) { "- $it" }}
@@ -200,6 +202,16 @@ ${if (gameState.gameMemory.isEmpty()) "暂无关键记忆" else gameState.gameMe
         val shown = if (size <= limit) this else takeLast(limit)
         val body = shown.joinToString("、", transform = transform)
         return if (shown.size < size) "$body（另有 ${size - shown.size} 项未列出）" else body
+    }
+
+    /**
+     * 逐行版本（任务、势力关系用）：每行一条，超限时末行标注被截断的数量。
+     */
+    private fun <T> List<T>.renderPromptLines(limit: Int, emptyText: String, line: (T) -> String): String {
+        if (isEmpty()) return emptyText
+        val shown = if (size <= limit) this else takeLast(limit)
+        val body = shown.joinToString("\n", transform = line)
+        return if (shown.size < size) "$body\n（另有 ${size - shown.size} 项未列出）" else body
     }
 
     /**

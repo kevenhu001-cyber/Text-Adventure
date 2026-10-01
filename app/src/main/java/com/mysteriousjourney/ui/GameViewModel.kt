@@ -54,6 +54,9 @@ class GameViewModel : ViewModel() {
         /** 主动推进剧情时发给 AI 的指令 */
         const val ADVANCE_PROMPT = "请继续推进剧情，描述当前环境并给出下一步选择"
 
+        /** 选项点击发给 AI 的指令前缀，气泡展示时剥掉 */
+        const val CHOICE_PREFIX = "用户选择了: "
+
         /** 流式中间帧的最小渲染间隔（毫秒），限制主线程全量重解析的频率 */
         const val RENDER_INTERVAL_MS = 50L
     }
@@ -129,7 +132,7 @@ class GameViewModel : ViewModel() {
     /**
      * 随机初始化游戏（随机场景）
      */
-    fun initializeGame(playerName: String = "旅行者") {
+    fun initializeGame() {
         val scenario = OpeningScenarios.getRandomScenario()
         initializeGameWithScenario(scenario)
     }
@@ -218,7 +221,11 @@ class GameViewModel : ViewModel() {
      * 玩家点击了某个分支选项
      */
     fun selectChoice(choice: ChoiceParser.Choice) {
-        sendMessage(userInput = "用户选择了: ${choice.text}", echoPlayerMessage = true)
+        sendMessage(
+            userInput = "$CHOICE_PREFIX${choice.text}",
+            echoPlayerMessage = true,
+            playerEcho = choice.text
+        )
     }
 
     /**
@@ -228,7 +235,11 @@ class GameViewModel : ViewModel() {
      * 共用这条路径。流式内容按固定节奏刷新，collect 正常结束后才提交最终 UI 状态——
      * 中间帧不可能再覆盖结果，因为根本不存在"迟到的帧"：所有 UI 写入都发生在这一个协程里。
      */
-    private fun sendMessage(userInput: String, echoPlayerMessage: Boolean) {
+    private fun sendMessage(
+        userInput: String,
+        echoPlayerMessage: Boolean,
+        playerEcho: String = userInput
+    ) {
         viewModelScope.launch {
             // 上一轮还在流式或打字机阶段时忽略重复触发
             if (_uiState.value.isLoading || _uiState.value.isTypewriterRunning) return@launch
@@ -243,7 +254,7 @@ class GameViewModel : ViewModel() {
             val placeholder = NarrativeMessage(id = messageId, content = "", isStreaming = true)
             val newMessages = buildList {
                 if (echoPlayerMessage) {
-                    add(NarrativeMessage(id = playerMessageId, content = userInput, isPlayer = true))
+                    add(NarrativeMessage(id = playerMessageId, content = playerEcho, isPlayer = true))
                 }
                 add(placeholder)
             }
@@ -261,7 +272,9 @@ class GameViewModel : ViewModel() {
                             val now = System.nanoTime() / 1_000_000
                             if (now - lastRenderAt >= RENDER_INTERVAL_MS) {
                                 lastRenderAt = now
-                                renderStreaming(messageId, buffer.toString())
+                                // 中间帧也要过 ChoiceParser：原始流末尾带着 {状态标记}
+                                // 和【选择】块，直接显示会把协议噪声闪到气泡里
+                                renderStreaming(messageId, ChoiceParser.parseResponse(buffer.toString()).narrative)
                             }
                         }
                         // 最终态在 collect 结束后统一提交，这里不做任何写入
@@ -387,6 +400,14 @@ class GameViewModel : ViewModel() {
      */
     fun loadGame(saveId: Long, onComplete: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
+            // 流式进行中读档会让 streamTurn 收尾时把旧状态写进新读入的 GameState，
+            // 回合的 AI 回复会混进另一个存档的历史里，这里直接拒绝
+            if (_uiState.value.isLoading) {
+                _uiState.update { it.copy(error = "正在生成回复，请稍后再读档") }
+                onComplete(false)
+                return@launch
+            }
+
             val loadedState = saveRepository.loadGame(saveId, GameState::class.java)
             if (loadedState == null) {
                 _uiState.update { it.copy(error = "加载存档失败：找不到存档数据") }
@@ -437,12 +458,15 @@ class GameViewModel : ViewModel() {
      * 消息 id 用负数，与时间戳生成的 id 天然不冲突。
      */
     private fun restoreMessages(state: GameState): List<NarrativeMessage> {
-        val history = state.chatHistory.mapIndexed { index, chatMessage ->
+        val history = state.chatHistory.mapIndexedNotNull { index, chatMessage ->
             val isPlayer = chatMessage.role == Message.ROLE_USER
+            // 推进剧情的内部指令实时不回显，读档后同样不还原成玩家气泡
+            if (isPlayer && chatMessage.content == ADVANCE_PROMPT) return@mapIndexedNotNull null
             NarrativeMessage(
                 id = -(index + 1L),
                 content = if (isPlayer) {
-                    chatMessage.content
+                    // 选项点击在 chatHistory 里带指令前缀，气泡只显示选项文本
+                    chatMessage.content.removePrefix(CHOICE_PREFIX)
                 } else {
                     TextFormatter.formatText(ChoiceParser.parseResponse(chatMessage.content).narrative)
                 },

@@ -2,6 +2,15 @@ package com.mysteriousjourney.data.repository
 
 import com.google.gson.Gson
 import com.mysteriousjourney.GameApplication
+import com.mysteriousjourney.domain.model.Attributes
+import com.mysteriousjourney.domain.model.GameState
+import com.mysteriousjourney.domain.model.Money
+import com.mysteriousjourney.domain.model.PlayerState
+import com.mysteriousjourney.domain.model.ProgressMetrics
+import com.mysteriousjourney.domain.model.Sanity
+import com.mysteriousjourney.domain.model.SequenceInfo
+import com.mysteriousjourney.domain.model.Spirituality
+import com.mysteriousjourney.domain.model.WorldState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -109,7 +118,18 @@ class SaveRepository(
         gameState: T,
         metadataFn: (suspend () -> SaveMetadata)? = null
     ) = withContext(Dispatchers.IO) {
-        val existing = readMeta(saveId) ?: return@withContext
+        // meta 损坏/丢失时补建一条占位元数据，而不是静默丢弃这次保存——
+        // 否则状态文件已写入但列表页永远看不到这个存档，形成"幽灵存档"。
+        val existing = readMeta(saveId) ?: SaveSlotEntry(
+            id = saveId,
+            name = "存档 $saveId",
+            timestamp = System.currentTimeMillis(),
+            playerName = "旅行者",
+            location = "未知",
+            spirit = DEFAULT_SPIRITUALITY_MAX,
+            madness = 0,
+            playTime = "0分钟"
+        )
         val metadata = metadataFn?.invoke() ?: SaveMetadata()
 
         writeMeta(existing.copy(
@@ -156,10 +176,20 @@ class SaveRepository(
      * 获取所有存档元数据，按时间倒序
      */
     suspend fun getAllSaves(): List<SaveSlotEntry> = withContext(Dispatchers.IO) {
-        metaFiles()
+        val entries = metaFiles()
             .mapNotNull { readMetaByFile(it) }
             // 损坏或孤立的元数据跳过，不影响其余存档显示
             .sortedByDescending { it.timestamp }
+
+        // meta 损坏或被删后会残留永不展示的 state 文件，读到列表时顺手清理。
+        // saveGame 先写 meta 再写 state，因此不会在保存中途误删正在写入的存档。
+        val knownIds = entries.mapTo(HashSet()) { it.id }
+        saveDir.listFiles { f -> f.isFile && f.name.endsWith(STATE_SUFFIX) }
+            ?.forEach { f ->
+                if (f.name.removeSuffix(STATE_SUFFIX).toLongOrNull() !in knownIds) f.delete()
+            }
+
+        entries
     }
 
     /**
@@ -250,36 +280,70 @@ class SaveRepository(
      */
     @Suppress("SENSELESS_COMPARISON")
     private fun <T> sanitize(state: T): T {
-        if (state !is com.mysteriousjourney.domain.model.GameState) return state
+        if (state !is GameState) return state
 
-        val player = state.player
-        val rawSpirit = player.spirituality
+        // 嵌套对象整体也可能缺成 null（例如旧版没有 spirituality 字段），先逐层兜底
+        val player = state.player ?: PlayerState()
+        val rawSpirit = player.spirituality ?: Spirituality(DEFAULT_SPIRITUALITY_MAX, DEFAULT_SPIRITUALITY_MAX)
         val safeMax = if (rawSpirit.max <= 0) DEFAULT_SPIRITUALITY_MAX else rawSpirit.max
         val safeSpirituality = rawSpirit.copy(
             max = safeMax,
             current = rawSpirit.current.coerceIn(0, safeMax)
         )
+        val rawSanity = player.sanity ?: Sanity(0, 0)
+        val rawMoney = player.money ?: Money(0, 0, 0)
+        val rawSequence = player.currentSequence ?: SequenceInfo("占卜家", 9)
 
         val safePlayer = player.copy(
-            name = player.name.ifBlank { "旅行者" },
+            name = player.name?.ifBlank { "旅行者" } ?: "旅行者",
+            surfaceIdentity = player.surfaceIdentity?.ifBlank { "普通学生" } ?: "普通学生",
+            currentSequence = rawSequence.copy(
+                name = rawSequence.name?.ifBlank { "占卜家" } ?: "占卜家"
+            ),
+            attributes = player.attributes ?: Attributes(),
             spirituality = safeSpirituality,
-            sanity = player.sanity.copy(madnessValue = player.sanity.madnessValue.coerceIn(0, 100)),
-            money = player.money.copy(
-                goldPounds = player.money.goldPounds.coerceAtLeast(0),
-                soles = player.money.soles.coerceAtLeast(0),
-                pence = player.money.pence.coerceAtLeast(0)
+            healthStatus = player.healthStatus?.ifBlank { "健康" } ?: "健康",
+            sanity = rawSanity.copy(
+                madnessValue = rawSanity.madnessValue.coerceIn(0, 100),
+                corruptionLevel = rawSanity.corruptionLevel.coerceAtLeast(0)
+            ),
+            money = rawMoney.copy(
+                goldPounds = rawMoney.goldPounds.coerceAtLeast(0),
+                soles = rawMoney.soles.coerceAtLeast(0),
+                pence = rawMoney.pence.coerceAtLeast(0)
             ),
             inventory = player.inventory ?: emptyList(),
+            detailedInventory = player.detailedInventory ?: emptyList(),
+            abilities = player.abilities ?: emptyList(),
             knowledge = player.knowledge ?: emptyList(),
-            statusEffects = player.statusEffects ?: emptyList()
+            statusEffects = player.statusEffects ?: emptyList(),
+            detailedStatusEffects = player.detailedStatusEffects ?: emptyList(),
+            factionRelations = player.factionRelations ?: emptyMap(),
+            npcRelations = player.npcRelations ?: emptyMap(),
+            fateNodes = player.fateNodes ?: emptyList(),
+            historyEvents = player.historyEvents ?: emptyList(),
+            rolePlayProgress = player.rolePlayProgress ?: emptyMap(),
+            rolePlayTopics = player.rolePlayTopics ?: emptyList(),
+            sealedItems = player.sealedItems ?: emptyList(),
+            madnessManifestation = player.madnessManifestation ?: "正常",
+            dailyLog = player.dailyLog ?: emptyList(),
+            titles = player.titles ?: emptyList(),
+            achievements = player.achievements ?: emptyList(),
+            characterRelations = player.characterRelations ?: emptyList(),
+            skillTree = player.skillTree ?: emptyList(),
+            destinyPath = player.destinyPath ?: emptyList(),
+            mysteryPoints = player.mysteryPoints ?: emptyList(),
+            progressMetrics = player.progressMetrics ?: ProgressMetrics()
         )
 
-        val world = state.world
+        val world = state.world ?: WorldState()
         val safeWorld = world.copy(
-            currentTime = world.currentTime.ifBlank { "未知" },
-            currentLocation = world.currentLocation.ifBlank { "未知" },
+            currentTime = world.currentTime?.ifBlank { "未知" } ?: "未知",
+            currentLocation = world.currentLocation?.ifBlank { "未知" } ?: "未知",
+            weather = world.weather ?: "",
             visitedLocations = world.visitedLocations ?: emptyList(),
-            openQuests = world.openQuests ?: emptyList()
+            openQuests = world.openQuests ?: emptyList(),
+            npcStates = world.npcStates ?: emptyMap()
         )
 
         return state.copy(

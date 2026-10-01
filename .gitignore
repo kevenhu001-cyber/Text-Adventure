@@ -28,4 +28,5 @@ graphify-out/
 
 # Misc
 *.bak
+*.apk
 backup_icons/
