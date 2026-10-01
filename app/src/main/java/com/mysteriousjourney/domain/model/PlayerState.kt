@@ -1,8 +1,8 @@
 package com.mysteriousjourney.domain.model
 
 /**
- *玩状态数据类
- *包含玩家的所有属性和状态信息
+ * 玩家状态数据类
+ * 包含玩家的所有属性和状态信息
  */
 data class PlayerState(
     val name: String = "旅行者",
@@ -70,7 +70,7 @@ data class HistoryEvent(
 )
 
 /**
- *序列信息
+ * 序列信息
  * @param name 序列名称
  * @param number 序列编号（9-0）
  * @param digestionProgress 消化进度（0-100）
@@ -82,7 +82,7 @@ data class SequenceInfo(
 )
 
 /**
- *值
+ * 灵性值
  */
 data class Spirituality(
     val current: Int,
@@ -90,7 +90,7 @@ data class Spirituality(
 )
 
 /**
- *状态
+ * 理智状态
  */
 data class Sanity(
     val madnessValue: Int,
@@ -107,7 +107,7 @@ data class Money(
 )
 
 /**
- *能力
+ * 能力
  */
 data class Ability(
     val name: String,
@@ -116,7 +116,7 @@ data class Ability(
 )
 
 /**
- *关系
+ * 阵营关系
  */
 data class FactionRelation(
     val status: String,
@@ -124,7 +124,7 @@ data class FactionRelation(
 )
 
 /**
- *命运节点
+ * 命运节点
  */
 data class FateNode(
     val id: String,
@@ -136,7 +136,7 @@ data class FateNode(
 )
 
 /**
- *封物
+ * 封印物
  */
 data class SealedItem(
     val name: String,

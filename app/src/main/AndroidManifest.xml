@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- usesCleartextTraffic=true 用于支持局域网/本地自建的 OpenAI 兼容端点（如 Ollama、LM Studio） -->
     <application
         android:name=".GameApplication"
         android:allowBackup="true"

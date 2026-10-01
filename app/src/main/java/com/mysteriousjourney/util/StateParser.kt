@@ -123,7 +123,7 @@ object StateParser {
         
         if (updates.spirituality == null) {
             // 增强灵性消耗识别，支持更多关键词和强度级别
-            val spiritConsumeRegex = Regex("灵性?[直觉]?[轻微中等大量严重些许略微]?消耗|消耗[了]?[轻微中等大量严重些许略微]?灵性|灵性[下降减少降低]", RegexOption.IGNORE_CASE)
+            val spiritConsumeRegex = Regex("灵性?(?:直觉)?(?:轻微|少量|些许|略微|中等|一般|普通|大量|严重|剧烈|大幅)?消耗|消耗了?(?:轻微|少量|些许|略微|中等|一般|普通|大量|严重|剧烈|大幅)?灵性|灵性(?:下降|减少|降低)", RegexOption.IGNORE_CASE)
             if (spiritConsumeRegex.containsMatchIn(response)) {
                 val intensity = when {
                     response.contains(Regex("(轻微|少量|些许|略微)", RegexOption.IGNORE_CASE)) -> 1
@@ -142,7 +142,7 @@ object StateParser {
             }
             
             // 增强灵性恢复识别
-            val spiritRecoverRegex = Regex("灵性?[直觉]?[轻微中等大量完全]?恢复|恢复[了]?[轻微中等大量完全]?灵性|灵性[上升增加提高]", RegexOption.IGNORE_CASE)
+            val spiritRecoverRegex = Regex("灵性?(?:直觉)?(?:轻微|少量|些许|略微|中等|一般|普通|大量|完全|彻底)?恢复|恢复了?(?:轻微|少量|些许|略微|中等|一般|普通|大量|完全|彻底)?灵性|灵性(?:上升|增加|提高)", RegexOption.IGNORE_CASE)
             if (spiritRecoverRegex.containsMatchIn(response)) {
                 val intensity = when {
                     response.contains(Regex("(轻微|少量|些许|略微)", RegexOption.IGNORE_CASE)) -> 1
@@ -172,7 +172,7 @@ object StateParser {
         
         if (updates.madness == null) {
             // 增强疯狂值下降识别
-            val madnessDecreaseRegex = Regex("理智?[轻微中等大量]?下降|精神[受损动摇崩溃]|san值[下降降低减少]", RegexOption.IGNORE_CASE)
+            val madnessDecreaseRegex = Regex("理智?(?:轻微|少量|些许|略微|中等|一般|普通|大量|严重|剧烈|大幅)?下降|精神(?:受损|动摇|崩溃)|san值(?:下降|降低|减少)", RegexOption.IGNORE_CASE)
             if (madnessDecreaseRegex.containsMatchIn(response)) {
                 val intensity = when {
                     response.contains(Regex("(轻微|少量|些许|略微)", RegexOption.IGNORE_CASE)) -> 1
@@ -191,7 +191,7 @@ object StateParser {
             }
             
             // 新增：疯狂值上升识别
-            val madnessIncreaseRegex = Regex("理智?[轻微中等大量]?上升|精神[恢复好转稳定]|san值[上升增加提高]", RegexOption.IGNORE_CASE)
+            val madnessIncreaseRegex = Regex("理智?(?:轻微|少量|些许|略微|中等|一般|普通|大量|严重|剧烈|大幅)?上升|精神(?:恢复|好转|稳定)|san值(?:上升|增加|提高)", RegexOption.IGNORE_CASE)
             if (madnessIncreaseRegex.containsMatchIn(response)) {
                 val intensity = when {
                     response.contains(Regex("(轻微|少量|些许|略微)", RegexOption.IGNORE_CASE)) -> 1
