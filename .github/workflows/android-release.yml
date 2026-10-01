@@ -76,7 +76,9 @@ jobs:
             find "$SDK_ROOT" -maxdepth 3 -name sdkmanager 2>/dev/null || true
             exit 1
           fi
-          chmod +x "$SDKMANAGER"
+          # runner 镜像里的 sdkmanager 已经可执行，且 SDK 目录属 root，
+          # chmod 会报 "Operation not permitted" 并在 set -e 下中断，所以这里容错处理。
+          chmod +x "$SDKMANAGER" 2>/dev/null || true
           echo "使用 sdkmanager: $SDKMANAGER"
 
           # 许可需在安装组件之前接受，否则 sdkmanager 会拒绝继续
