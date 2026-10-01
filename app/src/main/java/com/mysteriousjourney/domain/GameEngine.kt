@@ -173,7 +173,7 @@ ${GameConfig.SYSTEM_PROMPT}
 - 当前位置：${world.currentLocation}
 - 天气：${world.weather}
 - 已探索地点：${world.visitedLocations.renderPromptList(LOCATION_LIMIT)}
-- NPC关系：${player.npcRelations.renderPromptList(RELATION_LIMIT) { "${it.key}:${it.value}" }}
+- NPC关系：${player.npcRelations.renderPromptList(RELATION_LIMIT) { k, v -> "$k:$v" }}
 
 【当前任务】
 ${if (world.openQuests.isEmpty()) "暂无进行中的任务" else world.openQuests.map { "- ${it.name}: ${it.description} (${it.status})" }.joinToString("\n")}
